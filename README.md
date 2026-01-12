@@ -8,7 +8,7 @@ pkg: github.com/yelhousni/subgroup-membership-test-tate
 cpu: Apple M1
 BenchmarkIsInSubGroupCompare
 BenchmarkIsInSubGroupCompare/method=Tate
-BenchmarkIsInSubGroupCompare/method=Tate-8                 24345             49446 ns/op
+BenchmarkIsInSubGroupCompare/method=Tate-8                 26280             49446 ns/op
 BenchmarkIsInSubGroupCompare/method=GLV
-BenchmarkIsInSubGroupCompare/method=GLV-8                  31918             43363 ns/op
+BenchmarkIsInSubGroupCompare/method=GLV-8                  32474             36945 ns/op
 ```
