@@ -3,6 +3,7 @@ Implementing ePrint 2024/1790 on BLS12-381 G1 with precomputations.
 
 
 ## Benchmark
+On a AWS `c7a.8xlarge`:
 ```
 goos: linux
 goarch: amd64
