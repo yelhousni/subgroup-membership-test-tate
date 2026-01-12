@@ -1,14 +1,16 @@
 # subgroup-membership-test-tate
-Implementing ePrint 2024/1790
+Implementing ePrint 2024/1790 on BLS12-381 G1 with precomputations.
 
+
+## Benchmark
 ```
-goos: darwin
-goarch: arm64
+goos: linux
+goarch: amd64
 pkg: github.com/yelhousni/subgroup-membership-test-tate
-cpu: Apple M1
+cpu: AMD EPYC 9R14
 BenchmarkIsInSubGroupCompare
 BenchmarkIsInSubGroupCompare/method=Tate
-BenchmarkIsInSubGroupCompare/method=Tate-8                 26280             49446 ns/op
+BenchmarkIsInSubGroupCompare/method=Tate-32                24466             49005 ns/op
 BenchmarkIsInSubGroupCompare/method=GLV
-BenchmarkIsInSubGroupCompare/method=GLV-8                  32474             36945 ns/op
+BenchmarkIsInSubGroupCompare/method=GLV-32                 29142             41155 ns/op
 ```
