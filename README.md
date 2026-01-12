@@ -14,3 +14,5 @@ BenchmarkIsInSubGroupCompare/method=Tate-32                24466             490
 BenchmarkIsInSubGroupCompare/method=GLV
 BenchmarkIsInSubGroupCompare/method=GLV-32                 29142             41155 ns/op
 ```
+
+The new method seems to be 19% in this implementation but the paper reports it to be 2.7% faster in RELIC (subsection 1.1).
