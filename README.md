@@ -38,3 +38,15 @@ Some of the reasons that may explain this are:
 
 ## Optimisations
 The shared Miller loops use the NAF encoding of loop size `e2`. Instead, since it is fixed per curve, we can use a short addition chain to reduce the number of operations. The precomputation table should be then derived from this chain. Combined with minor software-level optimizations, this improvement shifts the performance balance: the Tate-based method, previously 19% slower, becomes 6.6% faster than the GLV-based method.
+
+```
+goos: linux
+goarch: amd64
+pkg: github.com/yelhousni/subgroup-membership-test-tate
+cpu: AMD EPYC 9R14
+BenchmarkIsInSubGroupCompare
+BenchmarkIsInSubGroupCompare/method=Tate
+BenchmarkIsInSubGroupCompare/method=Tate-32                31239             38411 ns/op
+BenchmarkIsInSubGroupCompare/method=GLV
+BenchmarkIsInSubGroupCompare/method=GLV-32                 29140             41180 ns/op
+```
