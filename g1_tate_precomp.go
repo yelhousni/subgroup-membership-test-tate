@@ -46,170 +46,51 @@ func g1TateSharedMillerLoopPrecomp(p *curve.G1Affine, n1, d1, n2, d2 *fp.Element
 	var xHatR fp.Element
 	xHatR.Mul(&p.X, &g1TatePrecompData.xHat)
 
-	n1.Sub(&p.X, &g1TatePrecompP.X)
+	n1.SetOne()
 	d1.SetOne()
-	n2.Sub(&xHatR, &g1TatePrecompP.X)
+	n2.SetOne()
 	d2.SetOne()
 
-	var d1c, d2c, d3 fp.Element
-	d1c.Set(n1)
-	d2c.Set(n2)
-	d3.Sub(&p.Y, &g1TatePrecompP.Y)
-
-	if len(g1TatePrecompNAF) == 0 {
+	if len(g1TatePrecompOps) == 0 {
+		return false
+	}
+	if len(g1TatePrecompTab) != len(g1TatePrecompOps)*4 {
 		return false
 	}
 
-	j := 0
-	if g1TatePrecompNAF[0] == -1 {
-		j = 1
-	}
+	// Addition-chain-driven Miller loop (ops derived from addchain.txt).
+	var t0, t1, t2, l1, l2, v1, v2 fp.Element
+	for i, op := range g1TatePrecompOps {
+		idx := i * 4
+		xR := &g1TatePrecompTab[idx]
+		yR := &g1TatePrecompTab[idx+1]
+		lambda := &g1TatePrecompTab[idx+2]
+		xNext := &g1TatePrecompTab[idx+3]
 
-	k := 0
-	// Algorithm 4 (lines 3–38) with Algorithm 3 precomputed table layout.
-	for i := len(g1TatePrecompNAF) - 2; i >= j; {
-		ni := g1TatePrecompNAF[i]
-		if ni == 0 && i != j {
-			// Algorithm 4, case ni = 0 and i != j (uses Tab[k..k+3]).
-			var t0, t1, t2, t3, t4, t5, t6 fp.Element
-			t0.Sub(&p.X, &g1TatePrecompTab[k+1])
-			t1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-			t2.Sub(&p.Y, &g1TatePrecompTab[k+2])
-			t3.Mul(&t0, &g1TatePrecompTab[k]).Add(&t3, &t2)
-			t4.Mul(&t1, &g1TatePrecompTab[k]).Add(&t4, &t2)
-			t5.Mul(&t0, &g1TatePrecompTab[k+3]).Neg(&t5).Add(&t5, &t2)
-			t6.Mul(&t1, &g1TatePrecompTab[k+3]).Add(&t6, &t2)
+		t0.Sub(&p.X, xR)
+		t1.Sub(&xHatR, xR)
+		t2.Sub(&p.Y, yR)
 
-			square2(d1)
-			square2(d2)
-			d1.Mul(d1, &t3)
-			d2.Mul(d2, &t4)
+		l1.Mul(lambda, &t0)
+		l1.Sub(&t2, &l1) // (y_P - y_R) - lambda*(x_P - x_R)
+		l2.Mul(lambda, &t1)
+		l2.Sub(&t2, &l2) // (y_P - y_R) - lambda*(x_P' - x_R)
 
-			var n1t, n2t fp.Element
-			n1t.Square(n1).Mul(&n1t, &t5).Square(&n1t)
-			n2t.Square(n2).Mul(&n2t, &t6).Square(&n2t)
-			n1.Set(&n1t)
-			n2.Set(&n2t)
+		v1.Sub(&p.X, xNext)
+		v2.Sub(&xHatR, xNext)
 
-			k += 4
-			i--
-			if i < j {
-				break
-			}
-			if g1TatePrecompNAF[i] == 1 {
-				var u0, u1, u2, u3 fp.Element
-				u0.Sub(&p.X, &g1TatePrecompTab[k+1])
-				u1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-				u2.Mul(&d1c, &g1TatePrecompTab[k])
-				u3.Mul(&d2c, &g1TatePrecompTab[k])
-
-				d1.Mul(d1, &u0)
-				d2.Mul(d2, &u1)
-				u2.Sub(&d3, &u2)
-				u3.Sub(&d3, &u3)
-				n1.Mul(n1, &u2)
-				n2.Mul(n2, &u3)
-
-				k += 2
-				i--
-			} else if g1TatePrecompNAF[i] == -1 {
-				var u0, u1, u2, u3 fp.Element
-				u0.Sub(&p.X, &g1TatePrecompTab[k+1])
-				u1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-				u2.Mul(&d1c, &g1TatePrecompTab[k])
-				u3.Mul(&d2c, &g1TatePrecompTab[k])
-
-				n1.Mul(n1, &u0)
-				n2.Mul(n2, &u1)
-				u2.Sub(&d3, &u2)
-				u3.Sub(&d3, &u3)
-				d1.Mul(d1, &u2)
-				d2.Mul(d2, &u3)
-
-				k += 2
-				i--
-			}
+		if op == 0 {
+			n1.Square(n1).Mul(n1, &l1)
+			n2.Square(n2).Mul(n2, &l2)
+			d1.Square(d1).Mul(d1, &v1)
+			d2.Square(d2).Mul(d2, &v2)
 			continue
 		}
 
-		if ni == 1 {
-			var t0, t1, u0, u1, u2, t2, t3 fp.Element
-			t0.Sub(&p.X, &g1TatePrecompTab[k])
-			t1.Sub(&xHatR, &g1TatePrecompTab[k])
-			u0.Add(&p.X, &g1TatePrecompTab[k+2]).Mul(&u0, &t0)
-			u1.Add(&xHatR, &g1TatePrecompTab[k+2]).Mul(&u1, &t1)
-			u2.Sub(&p.Y, &g1TatePrecompTab[k+1]).Mul(&u2, &g1TatePrecompTab[k+3])
-			t2.Sub(&u0, &u2)
-			t3.Sub(&u1, &u2)
-
-			n1.Square(n1).Mul(n1, &t2)
-			n2.Square(n2).Mul(n2, &t3)
-
-			d1.Mul(d1, &t0)
-			d2.Mul(d2, &t1)
-			d1.Square(d1)
-			d2.Square(d2)
-
-			k += 4
-			i--
-			continue
-		}
-
-		if ni == -1 {
-			var t0, t1, u0, u1, u2, t2, t3 fp.Element
-			t0.Sub(&p.X, &g1TatePrecompTab[k])
-			t1.Sub(&xHatR, &g1TatePrecompTab[k])
-			u0.Add(&p.X, &g1TatePrecompTab[k+2]).Mul(&u0, &t0)
-			u1.Add(&xHatR, &g1TatePrecompTab[k+2]).Mul(&u1, &t1)
-			u2.Sub(&p.Y, &g1TatePrecompTab[k+1]).Mul(&u2, &g1TatePrecompTab[k+3])
-			t2.Sub(&u0, &u2)
-			t3.Sub(&u1, &u2)
-
-			n1.Square(n1).Mul(n1, &t2)
-			n2.Square(n2).Mul(n2, &t3)
-
-			d1.Mul(d1, &t0)
-			d2.Mul(d2, &t1)
-			d1.Square(d1)
-			d2.Square(d2)
-			d1.Mul(d1, &d1c)
-			d2.Mul(d2, &d2c)
-
-			k += 4
-			i--
-			continue
-		}
-
-		// ni == 0
-		var t0, t1, t2, t3, t4 fp.Element
-		t0.Sub(&p.X, &g1TatePrecompTab[k+1])
-		t1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-		t2.Sub(&p.Y, &g1TatePrecompTab[k+2])
-		t3.Mul(&t0, &g1TatePrecompTab[k]).Add(&t3, &t2)
-		t4.Mul(&t1, &g1TatePrecompTab[k]).Add(&t4, &t2)
-
-		n1.Square(n1).Mul(n1, &t0)
-		n2.Square(n2).Mul(n2, &t1)
-
-		d1.Square(d1)
-		d2.Square(d2)
-		d1.Mul(d1, &t3)
-		d2.Mul(d2, &t4)
-
-		k += 3
-		i--
-	}
-
-	if g1TatePrecompNAF[0] == -1 {
-		var t0, t1 fp.Element
-		t0.Sub(&p.X, &g1TatePrecompTab[k])
-		t1.Sub(&xHatR, &g1TatePrecompTab[k])
-		n1.Square(n1)
-		n2.Square(n2)
-		d1.Square(d1)
-		d2.Square(d2)
-		d1.Mul(d1, &t0)
-		d2.Mul(d2, &t1)
+		n1.Mul(n1, &l1)
+		n2.Mul(n2, &l2)
+		d1.Mul(d1, &v1)
+		d2.Mul(d2, &v2)
 	}
 
 	if n1.IsZero() || d1.IsZero() || n2.IsZero() || d2.IsZero() {
