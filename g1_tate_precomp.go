@@ -59,7 +59,7 @@ func g1TateSharedMillerLoopPrecomp(p *curve.G1Affine, n1, d1, n2, d2 *fp.Element
 	}
 
 	// Addition-chain-driven Miller loop (ops derived from addchain.txt).
-	var t0, t1, t2, l1, l2, v1, v2 fp.Element
+	var t0, t1, t2, l1, v1, v2 fp.Element
 	for i, op := range g1TatePrecompOps {
 		idx := i * 4
 		xR := &g1TatePrecompTab[idx]
@@ -73,23 +73,27 @@ func g1TateSharedMillerLoopPrecomp(p *curve.G1Affine, n1, d1, n2, d2 *fp.Element
 
 		l1.Mul(lambda, &t0)
 		l1.Sub(&t2, &l1) // (y_P - y_R) - lambda*(x_P - x_R)
-		l2.Mul(lambda, &t1)
-		l2.Sub(&t2, &l2) // (y_P - y_R) - lambda*(x_P' - x_R)
-
 		v1.Sub(&p.X, xNext)
-		v2.Sub(&xHatR, xNext)
 
 		if op == 0 {
 			n1.Square(n1).Mul(n1, &l1)
-			n2.Square(n2).Mul(n2, &l2)
 			d1.Square(d1).Mul(d1, &v1)
+		} else {
+			n1.Mul(n1, &l1)
+			d1.Mul(d1, &v1)
+		}
+
+		l1.Mul(lambda, &t1)
+		l1.Sub(&t2, &l1) // (y_P - y_R) - lambda*(x_P' - x_R)
+		v2.Sub(&xHatR, xNext)
+
+		if op == 0 {
+			n2.Square(n2).Mul(n2, &l1)
 			d2.Square(d2).Mul(d2, &v2)
 			continue
 		}
 
-		n1.Mul(n1, &l1)
-		n2.Mul(n2, &l2)
-		d1.Mul(d1, &v1)
+		n2.Mul(n2, &l1)
 		d2.Mul(d2, &v2)
 	}
 
