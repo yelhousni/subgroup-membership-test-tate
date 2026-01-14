@@ -1,8 +1,6 @@
 package bls12381
 
 import (
-	"sync"
-
 	curve "github.com/consensys/gnark-crypto/ecc/bls12-381"
 	"github.com/consensys/gnark-crypto/ecc/bls12-381/fp"
 )
@@ -12,11 +10,15 @@ type g1TatePrecomp struct {
 }
 
 var (
-	g1TatePrecompOnce sync.Once
 	g1TatePrecompData g1TatePrecomp
 )
 
-// IsInSubGroupTatePrecomputed checks membership using a precomputed Tate pairing test.
+// IsInSubGroupTatePrecomputed returns true if the affine point p is in the
+// prime subgroup G1, false otherwise.
+//
+// It follows "Revisiting subgroup membership testing on pairing-friendly
+// curves via the Tate pairing" by Y. Dai, D. He, D. Koshelev, C. Peng, and Z.
+// Yang. https://ia.cr/2024/1790.
 func IsInSubGroupTatePrecomputed(p *curve.G1Affine) bool {
 	if p.IsInfinity() {
 		return true
@@ -26,7 +28,7 @@ func IsInSubGroupTatePrecomputed(p *curve.G1Affine) bool {
 	}
 
 	var n1, d1, n2, d2 fp.Element
-	// Algorithm 4 (shared Miller loop with precomputation) in ePrint 2024/1790.
+	// Algorithm 4 (shared Miller loop with precomputation)
 	if !g1TateSharedMillerLoopPrecomp(p, &n1, &d1, &n2, &d2) {
 		return false
 	}
@@ -36,180 +38,70 @@ func IsInSubGroupTatePrecomputed(p *curve.G1Affine) bool {
 	var f1, f2 fp.Element
 	f1.Mul(&h, &n1).Mul(&f1, &d2)
 	f2.Mul(&h, &n2).Mul(&f2, &d1)
-	// Algorithm 5 (final exponentiation checks) in ePrint 2024/1790.
-	f1 = *expTate1(&f1)
 
-	return f1.IsOne() && exp2CheckOne(&f2)
+	// Final expenentiations checks
+	return exp1CheckOne(&f1) && exp2CheckOne(&f2)
 }
 
+// g1TateSharedMillerLoopPrecomp computes the shared Miller loop using
+// precomputed data according to a short addition chain of e2.
 func g1TateSharedMillerLoopPrecomp(p *curve.G1Affine, n1, d1, n2, d2 *fp.Element) bool {
 	var xHatR fp.Element
 	xHatR.Mul(&p.X, &g1TatePrecompData.xHat)
 
-	n1.Sub(&p.X, &g1TatePrecompP.X)
+	n1.SetOne()
 	d1.SetOne()
-	n2.Sub(&xHatR, &g1TatePrecompP.X)
+	n2.SetOne()
 	d2.SetOne()
 
-	var d1c, d2c, d3 fp.Element
-	d1c.Set(n1)
-	d2c.Set(n2)
-	d3.Sub(&p.Y, &g1TatePrecompP.Y)
-
-	if len(g1TatePrecompNAF) == 0 {
+	ops := g1TatePrecompOps
+	tab := g1TatePrecompTab
+	if len(ops) == 0 {
+		return false
+	}
+	if len(tab) != len(ops)*4 {
 		return false
 	}
 
-	j := 0
-	if g1TatePrecompNAF[0] == -1 {
-		j = 1
-	}
+	// Addition-chain-driven Miller loop
+	var t0, t1, t2, l1, v1, v2 fp.Element
+	pX := &p.X
+	pY := &p.Y
+	for i, op := range ops {
+		idx := i << 2
+		xR := &tab[idx]
+		yR := &tab[idx+1]
+		lambda := &tab[idx+2]
+		xNext := &tab[idx+3]
 
-	k := 0
-	// Algorithm 4 (lines 3–38) with Algorithm 3 precomputed table layout.
-	for i := len(g1TatePrecompNAF) - 2; i >= j; {
-		ni := g1TatePrecompNAF[i]
-		if ni == 0 && i != j {
-			// Algorithm 4, case ni = 0 and i != j (uses Tab[k..k+3]).
-			var t0, t1, t2, t3, t4, t5, t6 fp.Element
-			t0.Sub(&p.X, &g1TatePrecompTab[k+1])
-			t1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-			t2.Sub(&p.Y, &g1TatePrecompTab[k+2])
-			t3.Mul(&t0, &g1TatePrecompTab[k]).Add(&t3, &t2)
-			t4.Mul(&t1, &g1TatePrecompTab[k]).Add(&t4, &t2)
-			t5.Mul(&t0, &g1TatePrecompTab[k+3]).Neg(&t5).Add(&t5, &t2)
-			t6.Mul(&t1, &g1TatePrecompTab[k+3]).Add(&t6, &t2)
+		t0.Sub(pX, xR)
+		t1.Sub(&xHatR, xR)
+		t2.Sub(pY, yR)
 
-			square2(d1)
-			square2(d2)
-			d1.Mul(d1, &t3)
-			d2.Mul(d2, &t4)
+		l1.Mul(lambda, &t0)
+		l1.Sub(&t2, &l1) // (y_P - y_R) - lambda*(x_P - x_R)
+		v1.Sub(pX, xNext)
 
-			var n1t, n2t fp.Element
-			n1t.Square(n1).Mul(&n1t, &t5).Square(&n1t)
-			n2t.Square(n2).Mul(&n2t, &t6).Square(&n2t)
-			n1.Set(&n1t)
-			n2.Set(&n2t)
+		if op == 0 {
+			n1.Square(n1).Mul(n1, &l1)
+			d1.Square(d1).Mul(d1, &v1)
+		} else {
+			n1.Mul(n1, &l1)
+			d1.Mul(d1, &v1)
+		}
 
-			k += 4
-			i--
-			if i < j {
-				break
-			}
-			if g1TatePrecompNAF[i] == 1 {
-				var u0, u1, u2, u3 fp.Element
-				u0.Sub(&p.X, &g1TatePrecompTab[k+1])
-				u1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-				u2.Mul(&d1c, &g1TatePrecompTab[k])
-				u3.Mul(&d2c, &g1TatePrecompTab[k])
+		l1.Mul(lambda, &t1)
+		l1.Sub(&t2, &l1) // (y_P - y_R) - lambda*(x_P' - x_R)
+		v2.Sub(&xHatR, xNext)
 
-				d1.Mul(d1, &u0)
-				d2.Mul(d2, &u1)
-				u2.Sub(&d3, &u2)
-				u3.Sub(&d3, &u3)
-				n1.Mul(n1, &u2)
-				n2.Mul(n2, &u3)
-
-				k += 2
-				i--
-			} else if g1TatePrecompNAF[i] == -1 {
-				var u0, u1, u2, u3 fp.Element
-				u0.Sub(&p.X, &g1TatePrecompTab[k+1])
-				u1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-				u2.Mul(&d1c, &g1TatePrecompTab[k])
-				u3.Mul(&d2c, &g1TatePrecompTab[k])
-
-				n1.Mul(n1, &u0)
-				n2.Mul(n2, &u1)
-				u2.Sub(&d3, &u2)
-				u3.Sub(&d3, &u3)
-				d1.Mul(d1, &u2)
-				d2.Mul(d2, &u3)
-
-				k += 2
-				i--
-			}
+		if op == 0 {
+			n2.Square(n2).Mul(n2, &l1)
+			d2.Square(d2).Mul(d2, &v2)
 			continue
 		}
 
-		if ni == 1 {
-			var t0, t1, u0, u1, u2, t2, t3 fp.Element
-			t0.Sub(&p.X, &g1TatePrecompTab[k])
-			t1.Sub(&xHatR, &g1TatePrecompTab[k])
-			u0.Add(&p.X, &g1TatePrecompTab[k+2]).Mul(&u0, &t0)
-			u1.Add(&xHatR, &g1TatePrecompTab[k+2]).Mul(&u1, &t1)
-			u2.Sub(&p.Y, &g1TatePrecompTab[k+1]).Mul(&u2, &g1TatePrecompTab[k+3])
-			t2.Sub(&u0, &u2)
-			t3.Sub(&u1, &u2)
-
-			n1.Square(n1).Mul(n1, &t2)
-			n2.Square(n2).Mul(n2, &t3)
-
-			d1.Mul(d1, &t0)
-			d2.Mul(d2, &t1)
-			d1.Square(d1)
-			d2.Square(d2)
-
-			k += 4
-			i--
-			continue
-		}
-
-		if ni == -1 {
-			var t0, t1, u0, u1, u2, t2, t3 fp.Element
-			t0.Sub(&p.X, &g1TatePrecompTab[k])
-			t1.Sub(&xHatR, &g1TatePrecompTab[k])
-			u0.Add(&p.X, &g1TatePrecompTab[k+2]).Mul(&u0, &t0)
-			u1.Add(&xHatR, &g1TatePrecompTab[k+2]).Mul(&u1, &t1)
-			u2.Sub(&p.Y, &g1TatePrecompTab[k+1]).Mul(&u2, &g1TatePrecompTab[k+3])
-			t2.Sub(&u0, &u2)
-			t3.Sub(&u1, &u2)
-
-			n1.Square(n1).Mul(n1, &t2)
-			n2.Square(n2).Mul(n2, &t3)
-
-			d1.Mul(d1, &t0)
-			d2.Mul(d2, &t1)
-			d1.Square(d1)
-			d2.Square(d2)
-			d1.Mul(d1, &d1c)
-			d2.Mul(d2, &d2c)
-
-			k += 4
-			i--
-			continue
-		}
-
-		// ni == 0
-		var t0, t1, t2, t3, t4 fp.Element
-		t0.Sub(&p.X, &g1TatePrecompTab[k+1])
-		t1.Sub(&xHatR, &g1TatePrecompTab[k+1])
-		t2.Sub(&p.Y, &g1TatePrecompTab[k+2])
-		t3.Mul(&t0, &g1TatePrecompTab[k]).Add(&t3, &t2)
-		t4.Mul(&t1, &g1TatePrecompTab[k]).Add(&t4, &t2)
-
-		n1.Square(n1).Mul(n1, &t0)
-		n2.Square(n2).Mul(n2, &t1)
-
-		d1.Square(d1)
-		d2.Square(d2)
-		d1.Mul(d1, &t3)
-		d2.Mul(d2, &t4)
-
-		k += 3
-		i--
-	}
-
-	if g1TatePrecompNAF[0] == -1 {
-		var t0, t1 fp.Element
-		t0.Sub(&p.X, &g1TatePrecompTab[k])
-		t1.Sub(&xHatR, &g1TatePrecompTab[k])
-		n1.Square(n1)
-		n2.Square(n2)
-		d1.Square(d1)
-		d2.Square(d2)
-		d1.Mul(d1, &t0)
-		d2.Mul(d2, &t1)
+		n2.Mul(n2, &l1)
+		d2.Mul(d2, &v2)
 	}
 
 	if n1.IsZero() || d1.IsZero() || n2.IsZero() || d2.IsZero() {
@@ -218,27 +110,7 @@ func g1TateSharedMillerLoopPrecomp(p *curve.G1Affine, n1, d1, n2, d2 *fp.Element
 	return true
 }
 
-func square2(v *fp.Element) {
-	v.Square(v)
-	v.Square(v)
-}
-
-func exp2CheckOne(x *fp.Element) bool {
-	var u0, u1, u2, u3 fp.Element
-	u0.Square(x)
-	u1 = *expByZ(x)
-	u0.Mul(&u0, &u1)
-	u1 = *expByZ(&u1)
-	u0.Mul(&u0, &u1)
-	u2 = *expByZ(&u1)
-	u3 = *expByZ(&u2)
-	u1.Mul(&u2, &u3)
-	u2 = *expByZ(&u3)
-	u0.Mul(&u0, &u2)
-	return u0.Equal(&u1)
-}
-
-// expByZ raises x to the BLS12-381 seed z using a fixed addition chain.
+// expByZ raises x to the BLS12-381 seed z using a short addition chain.
 func expByZ(x *fp.Element) *fp.Element {
 	var u0 fp.Element
 	u0.Square(x)
@@ -264,64 +136,28 @@ func expByZ(x *fp.Element) *fp.Element {
 	return &u0
 }
 
-func expTate1(x *fp.Element) *fp.Element {
-	// FixedExp computation is derived from the addition chain:
-	//
-	//	_10       = 2*1
-	//	_100      = 2*_10
-	//	_110      = _10 + _100
-	//	_111      = 1 + _110
-	//	_1010     = _100 + _110
-	//	_1110     = _100 + _1010
-	//	_10000    = _10 + _1110
-	//	_10101    = _111 + _1110
-	//	_11000    = _1010 + _1110
-	//	_11010    = _10 + _11000
-	//	_11111    = _111 + _11000
-	//	_100010   = _1010 + _11000
-	//	_100011   = 1 + _100010
-	//	_111101   = _11010 + _100011
-	//	_1010101  = _11000 + _111101
-	//	_1101101  = _11000 + _1010101
-	//	_1101111  = _10 + _1101101
-	//	_1111111  = _10000 + _1101111
-	//	_10000001 = _10 + _1111111
-	//	_10001011 = _1010 + _10000001
-	//	_10001101 = _10 + _10001011
-	//	_10010101 = _1010 + _10001011
-	//	_10010111 = _10 + _10010101
-	//	_10011001 = _10 + _10010111
-	//	_10011011 = _10 + _10011001
-	//	_10100101 = _1010 + _10011011
-	//	_10101011 = _110 + _10100101
-	//	_10110101 = _1010 + _10101011
-	//	_10111011 = _110 + _10110101
-	//	_10111101 = _10 + _10111011
-	//	_10111111 = _10 + _10111101
-	//	_11000101 = _110 + _10111111
-	//	_11100111 = _100010 + _11000101
-	//	_11101011 = _100 + _11100111
-	//	_11111001 = _1110 + _11101011
-	//	_11111101 = _100 + _11111001
-	//	i66       = ((_11111101 << 8 + _10011001) << 11 + _10011001) << 9
-	//	i86       = ((_10100101 + i66) << 10 + _11111001) << 7 + _1101111
-	//	i114      = ((i86 << 4 + _111) << 11 + _100011) << 11
-	//	i133      = ((_10111101 + i114) << 6 + _111101) << 10 + _10000001
-	//	i157      = ((i133 << 9 + _11100111) << 8 + _10001011) << 5
-	//	i180      = ((_11111 + i157) << 11 + _11101011) << 9 + _10110101
-	//	i209      = ((i180 << 10 + _10111011) << 10 + _10100101) << 7
-	//	i229      = ((_1111111 + i209) << 9 + _10001101) << 8 + _10011011
-	//	i255      = (2*(i229 << 8 + _10111101) + 1) << 15
-	//	i276      = ((_10010101 + i255) << 9 + _1101101) << 9 + _10101011
-	//	i306      = ((i276 << 9 + _11000101) << 9 + _10010111) << 10
-	//	i326      = ((_11111101 + i306) << 6 + _10111111) << 11 + _1010101
-	//	i353      = ((i326 << 8 + _1010101) << 8 + _1010101) << 9
-	//	i373      = ((_1010101 + i353) << 9 + _10101011) << 8 + _1010101
-	//	return      2*(i373 << 6 + _10101)
-	//
+// exp2CheckOne checks that x^{|z^5−z^4−z^3+z^2+z+2|} == 1 using a short
+// addition chain.
+func exp2CheckOne(x *fp.Element) bool {
+	var u0, u1, u2, u3 fp.Element
+	u0.Square(x)
+	u1 = *expByZ(x)
+	u0.Mul(&u0, &u1)
+	u1 = *expByZ(&u1)
+	u0.Mul(&u0, &u1)
+	u2 = *expByZ(&u1)
+	u3 = *expByZ(&u2)
+	u1.Mul(&u2, &u3)
+	u2 = *expByZ(&u3)
+	u0.Mul(&u0, &u2)
+	return u0.Equal(&u1)
+}
+
+// exp1CheckOne checks that x^{(p-1)/e2} == 1 using a short addition chain.
+func exp1CheckOne(x *fp.Element) bool {
 	// Operations: 311 squares 70 multiplies
 	//
-	// Generated by github.com/mmcloughlin/addchain v0.4.0.
+	// Addition chain generated by github.com/mmcloughlin/addchain v0.4.0.
 
 	// Allocate Temporaries.
 	var z fp.Element
@@ -753,5 +589,5 @@ func expTate1(x *fp.Element) *fp.Element {
 	// Step 381: z = x^0x1fb322654a7cef70462f7d205cf17f1d6b52eca5fe8d9bbd809536aad8a973fff0aaaaaa5555aaaa
 	z.Square(&z)
 
-	return &z
+	return z.IsOne()
 }
