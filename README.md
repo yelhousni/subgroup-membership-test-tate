@@ -35,18 +35,3 @@ The Tate-based methods with precomputations are similar (49400 ns vs. 49024 ns) 
 Some of the reasons that may explain this are:
 - RELIC uses a generic multiplication by the `seed=z` in the GLV method (`g1_mul_any`) while gnark-crypto uses a short addition chain.
 - RELIC checks: `psi^2(P) == [-z^2]P` by applying `psi: (x,y)->(w*x,y)` twice instead of precomputing `w^2 mod r`.
-
-## Optimisations
-The shared Miller loops use the NAF encoding of loop size `e2`. Instead, since it is fixed per curve, we can use a short addition chain to reduce the number of operations. The precomputation table should be then derived from this chain. Combined with minor software-level optimizations, this improvement shifts the performance balance: the Tate-based method, previously 19% slower, becomes 6.6% faster than the GLV-based method.
-
-```
-goos: linux
-goarch: amd64
-pkg: github.com/yelhousni/subgroup-membership-test-tate
-cpu: AMD EPYC 9R14
-BenchmarkIsInSubGroupCompare
-BenchmarkIsInSubGroupCompare/method=Tate
-BenchmarkIsInSubGroupCompare/method=Tate-32                31239             38411 ns/op
-BenchmarkIsInSubGroupCompare/method=GLV
-BenchmarkIsInSubGroupCompare/method=GLV-32                 29140             41180 ns/op
-```
