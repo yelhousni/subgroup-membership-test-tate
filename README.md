@@ -16,7 +16,7 @@ BenchmarkIsInSubGroupCompare/method=GLV
 BenchmarkIsInSubGroupCompare/method=GLV-32                 29142             41155 ns/op
 ```
 
-The new method seems to be 19% slower compared to Scott's test, but the paper reports it to be 2.7% faster in RELIC (subsection 1.1).
+The new method seems to be 19% slower compared to Scott's test, but the paper reports it to be 2.7% faster in RELIC (subsection 1.1). After a few optimisations I could best get to 12% slower (`46139 ns/op``).
 
 The code related to the paper is available at: https://github.com/eccdaiy39/test-tate. I benchmarked on the same machine:
 ```
