@@ -1,7 +1,6 @@
 package bls12377
 
 import (
-	"math/big"
 	"sync"
 
 	curve "github.com/consensys/gnark-crypto/ecc/bls12-377"
@@ -16,26 +15,24 @@ type loopkupTable struct {
 var (
 	precomputeTableOnce sync.Once
 	precomputedTable    loopkupTable
-
-	tateExp1Once     sync.Once
-	tateExp1Exponent big.Int
 )
 
 // NAF digits used by Algorithms 3/4 (Section 4.2) for BLS12-377.
-// z = 0x8508c00000000001
+// e2-1 = z-2 = 0x8508bfffffffffff (z > 0)
+// NAF(z-2) with padding to match BLS12-381 structure (65 elements, naf[64]=0)
 var naf = [65]int8{
-	1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0,
-	1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0,
+	-1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+	0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 1, 0,
+	0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0,
 }
 
 // precomputeTableDefault returns a cached precomputation table for torsionPoint.
 func precomputeTableDefault() loopkupTable {
 	precomputeTableOnce.Do(func() {
+		// Point with exact order e2 = |z-1| = 0x8508c00000000000
 		var torsionPoint curve.G1Affine
-		torsionPoint.X.SetString("0x145387f5ea6da986ecb600dcc75d07f2c45b6e723b613c003d0e20306569b69b6baeebfa4380de7dbdf84987b8c5736")
-		torsionPoint.Y.SetString("0xdfa4022db416f2e58288472269c4e13fd9d3f40fd1da489b3c33671a05f3599b370590373475ebb4cb13ef2c46388c")
+		torsionPoint.X.SetString("50650456740282261254444037957372148278657828508220767125535350349422402980993056080580432127086515431542182301593")
+		torsionPoint.Y.SetString("211780388751464357047145090878738766994067119315669641699537871325723620439548899400758824542777430317160612183399")
 		precomputedTable = generateTable(&torsionPoint)
 	})
 	return precomputedTable
@@ -43,8 +40,9 @@ func precomputeTableDefault() loopkupTable {
 
 // generateTable precomputes the lookup table used by the Tate-based G1 membership test.
 // Algorithm 3 (Section 4.2): lookup table generation for the shared Miller loop.
+// For BLS12-377: naf[63]=1 is handled by initialization, so loop starts at i=62.
 func generateTable(q *curve.G1Affine) loopkupTable {
-	i := 63
+	i := 62
 	j := 0
 	if naf[0] < 0 {
 		j = 1
@@ -168,7 +166,21 @@ func generateTable(q *curve.G1Affine) loopkupTable {
 	}
 
 	if naf[0] < 0 {
-		tab = append(tab, t0.X)
+		// Special case for BLS12-377: at this point t0 = [e2/2]Q which is a 2-torsion
+		// point (has Y = 0). The last default doubling at i=1 stored the coordinates
+		// of t0 = [e2/2]Q = (-1, 0) as tab[k-2], tab[k-1].
+		//
+		// For a 2-torsion point (Y = 0):
+		// - The tangent is vertical: P.X - T.X
+		// - Doubling gives O (infinity)
+		//
+		// For the subtraction O - Q = -Q:
+		// - Line through O and -Q is vertical at Q: P.X - Q.X
+		// - Vertical at -Q: P.X - Q.X (same)
+		// - These cancel in n/d, contributing nothing
+		//
+		// We don't need extra table entries. The Miller loop will use tab[k-2] = T.X = -1
+		// for the vertical tangent at the 2-torsion point.
 	}
 
 	return loopkupTable{

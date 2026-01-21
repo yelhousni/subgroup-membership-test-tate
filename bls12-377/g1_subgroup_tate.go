@@ -56,7 +56,8 @@ func membershipTest(p, q *curve.G1Affine, tab []fp.Element) bool {
 }
 
 func sharedMillerloop(tab []fp.Element, n1, d1, n2, d2 *fp.Element, q, p, p2 *curve.G1Affine) {
-	i := 63
+	// For BLS12-377: naf[63]=1 is handled by initialization, so loop starts at i=62.
+	i := 62
 	j := 0
 	k := 0
 	if naf[0] < 0 {
@@ -190,34 +191,54 @@ func sharedMillerloop(tab []fp.Element, n1, d1, n2, d2 *fp.Element, q, p, p2 *cu
 	}
 
 	if naf[0] < 0 {
-		g1.Sub(&p.X, &tab[k])
-		g2.Sub(&p2.X, &tab[k])
+		// Special case for BLS12-377: at this point T = [e2/2]Q which is a 2-torsion
+		// point (Y = 0). The last iteration stored T.X at tab[k-2].
+		//
+		// For a 2-torsion point:
+		// - Tangent is vertical: P.X - T.X
+		// - Doubled point is O
+		//
+		// The subtraction O - Q = -Q contributes nothing (line and vertical cancel).
+		//
+		// Miller function update:
+		// - n = n^2 * (vertical at 2T) = n^2 * 1 (2T = O)
+		// - d = d^2 * (tangent at T) = d^2 * (P.X - T.X)
+		g1.Sub(&p.X, &tab[k-2])  // P.X - T.X where T.X = -1
+		g2.Sub(&p2.X, &tab[k-2])
+
 		n1.Square(n1)
 		d1.Square(d1)
 		d1.Mul(d1, &g1)
+
 		n2.Square(n2)
 		d2.Square(d2)
 		d2.Mul(d2, &g2)
 	}
 }
 
-// f2IsOne raises x to exp2 = |z^5-z^4-z^3+z^2+z+2| and checks if the result is 1
+// f2IsOne raises x to exp2 = z^5-z^4-z^3+z^2+z+2 and checks if the result is 1
+// For BLS12-377 (z > 0), exp2 = z^5 - z^4 - z^3 + z^2 + z + 2
+// We check: x^{z^5 + z^2 + z + 2} == x^{z^4 + z^3}
 func f2IsOne(x *fp.Element) bool {
-	var u0, u1, u2, u3 fp.Element
+	var u0, u1, u2, u3, u4, u5 fp.Element
 
 	// Section 4.3: exp2 final exponentiation for the Tate test.
-	u0.Square(x)
-	expBySeed(&u1, x)
-	expBySeed(&u2, &u1)
-	expBySeed(&u3, &u2)
-	u0.Mul(&u0, &u2)
-	u0.Mul(&u0, &u3)
-	expBySeed(&u3, &u3)
-	u1.Mul(&u1, &u3)
-	expBySeed(&u3, &u3)
-	u1.Mul(&u1, &u3)
+	u0.Square(x)        // x^2
+	expBySeed(&u1, x)   // x^z
+	expBySeed(&u2, &u1) // x^{z^2}
+	expBySeed(&u3, &u2) // x^{z^3}
+	expBySeed(&u4, &u3) // x^{z^4}
+	expBySeed(&u5, &u4) // x^{z^5}
 
-	return u0.Equal(&u1)
+	// Left side: x^{2 + z + z^2 + z^5}
+	u0.Mul(&u0, &u1) // x^{2+z}
+	u0.Mul(&u0, &u2) // x^{2+z+z^2}
+	u0.Mul(&u0, &u5) // x^{2+z+z^2+z^5}
+
+	// Right side: x^{z^3 + z^4}
+	u3.Mul(&u3, &u4) // x^{z^3+z^4}
+
+	return u0.Equal(&u3)
 }
 
 // expBySeed computes z = x^z where z = 0x8508c00000000001
