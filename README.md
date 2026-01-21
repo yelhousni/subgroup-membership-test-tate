@@ -1,5 +1,5 @@
 # subgroup-membership-test-tate
-Implementing ePrint 2024/1790 on BLS12-381 G1 with precomputations.
+Implementing ePrint 2024/1790 on BLS12-381 G1 with precomputations. Also for BLS12-377 (see DIFF.md for a key implementation difference that resulted in a earlier bug for BLS12-377).
 
 
 ## Benchmarks
