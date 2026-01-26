@@ -561,9 +561,11 @@ func millerLoopSingle(q, p *curve.G1Affine) (num, den fp.Element) {
 
 // ladderState stores the ladder state at a given iteration
 type ladderState struct {
-	xR0, zR0 fp.Element // Current R0 = [k]Q
-	xR1, zR1 fp.Element // Current R1 = [k+1]Q
-	bit      uint8      // The bit value at this iteration
+	xR0, zR0   fp.Element // Current R0 = [k]Q
+	xR1, zR1   fp.Element // Current R1 = [k+1]Q
+	diffR0     fp.Element // xR0 - zR0 (precomputed for Karatsuba)
+	diffR1     fp.Element // xR1 - zR1 (precomputed for Karatsuba)
+	bit        uint8      // The bit value at this iteration
 }
 
 // Precomputed cubical table for Q with full ladder trajectory
@@ -613,6 +615,8 @@ func precomputeCubicalTable() *cubicalTable {
 			cubicalPrecomp.states[idx].zR0.Set(&zR0)
 			cubicalPrecomp.states[idx].xR1.Set(&xR1)
 			cubicalPrecomp.states[idx].zR1.Set(&zR1)
+			cubicalPrecomp.states[idx].diffR0.Sub(&xR0, &zR0)
+			cubicalPrecomp.states[idx].diffR1.Sub(&xR1, &zR1)
 			cubicalPrecomp.states[idx].bit = bit
 
 			// Perform ladder step
@@ -698,56 +702,71 @@ func membershipTestCubicalPrecomputed(p *curve.G1Affine, tab *cubicalTable) bool
 	xT1, zT1 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, &xP, &oneZ, &invXQmP)
 	xT2, zT2 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, &xP2, &oneZ, &invXQmP2)
 
-	// Temporaries
-	var U, V, t1, t2, Vdiff fp.Element
+	// Temporaries - using optimized Karatsuba-like formula
+	// Standard cADD: 4M (for products) + 1M (by inv) + 2S = 5M + 2S per cADD
+	// Optimized: 3M (for products) + 1M (by inv) + 2S = 4M + 2S per cADD
+	// With 2 cADDs sharing R and precomputed diffR, we achieve maximum efficiency
+	var A1, B1, P3_1, sumT1, diff1_1, Vdiff1 fp.Element
+	var A2, B2, P3_2, sumT2, diff1_2, Vdiff2 fp.Element
 	var xT1new, zT1new, xT2new, zT2new fp.Element
 
-	// Process using precomputed ladder states
+	// Process using precomputed ladder states with optimized formula
+	// Karatsuba-like: (X_T + Z_T)(X_R - Z_R) = X_T*X_R - X_T*Z_R + Z_T*X_R - Z_T*Z_R
+	//                                        = A - B - Vdiff
+	// So: Vdiff = (A - B) - P3
 	for idx := 0; idx < 63; idx++ {
 		state := &tab.states[idx]
 
 		if state.bit == 0 {
 			// T1 += R0, T2 += R0 (diff = P, P2)
-			U.Mul(&xT1, &state.xR0)
-			V.Mul(&zT1, &state.zR0)
-			t1.Mul(&xT1, &state.zR0)
-			t2.Mul(&zT1, &state.xR0)
-			Vdiff.Sub(&t1, &t2)
-			xT1new.Sub(&U, &V)
-			xT1new.Square(&xT1new)
-			xT1new.Mul(&xT1new, &invXP)
-			zT1new.Square(&Vdiff)
+			// Both use same R0, diffR0 is precomputed
 
-			U.Mul(&xT2, &state.xR0)
-			V.Mul(&zT2, &state.zR0)
-			t1.Mul(&xT2, &state.zR0)
-			t2.Mul(&zT2, &state.xR0)
-			Vdiff.Sub(&t1, &t2)
-			xT2new.Sub(&U, &V)
-			xT2new.Square(&xT2new)
-			xT2new.Mul(&xT2new, &invXP2)
-			zT2new.Square(&Vdiff)
+			// T1: 3M + 1M(inv) + 2S = 4M + 2S
+			A1.Mul(&xT1, &state.xR0)      // 1M
+			B1.Mul(&zT1, &state.zR0)      // 1M
+			sumT1.Add(&xT1, &zT1)         // 1A
+			P3_1.Mul(&sumT1, &state.diffR0) // 1M (uses precomputed diffR0)
+			diff1_1.Sub(&A1, &B1)         // 1A
+			Vdiff1.Sub(&diff1_1, &P3_1)   // 1A
+			xT1new.Square(&diff1_1)       // 1S
+			xT1new.Mul(&xT1new, &invXP)   // 1M
+			zT1new.Square(&Vdiff1)        // 1S
+
+			// T2: 3M + 1M(inv) + 2S = 4M + 2S
+			A2.Mul(&xT2, &state.xR0)        // 1M
+			B2.Mul(&zT2, &state.zR0)        // 1M
+			sumT2.Add(&xT2, &zT2)           // 1A
+			P3_2.Mul(&sumT2, &state.diffR0) // 1M (uses precomputed diffR0)
+			diff1_2.Sub(&A2, &B2)           // 1A
+			Vdiff2.Sub(&diff1_2, &P3_2)     // 1A
+			xT2new.Square(&diff1_2)         // 1S
+			xT2new.Mul(&xT2new, &invXP2)    // 1M
+			zT2new.Square(&Vdiff2)          // 1S
 		} else {
 			// T1 += R1, T2 += R1 (diff = Q-P, Q-P2)
-			U.Mul(&xT1, &state.xR1)
-			V.Mul(&zT1, &state.zR1)
-			t1.Mul(&xT1, &state.zR1)
-			t2.Mul(&zT1, &state.xR1)
-			Vdiff.Sub(&t1, &t2)
-			xT1new.Sub(&U, &V)
-			xT1new.Square(&xT1new)
-			xT1new.Mul(&xT1new, &invXQmP)
-			zT1new.Square(&Vdiff)
+			// Both use same R1, diffR1 is precomputed
 
-			U.Mul(&xT2, &state.xR1)
-			V.Mul(&zT2, &state.zR1)
-			t1.Mul(&xT2, &state.zR1)
-			t2.Mul(&zT2, &state.xR1)
-			Vdiff.Sub(&t1, &t2)
-			xT2new.Sub(&U, &V)
-			xT2new.Square(&xT2new)
-			xT2new.Mul(&xT2new, &invXQmP2)
-			zT2new.Square(&Vdiff)
+			// T1: 4M + 2S
+			A1.Mul(&xT1, &state.xR1)        // 1M
+			B1.Mul(&zT1, &state.zR1)        // 1M
+			sumT1.Add(&xT1, &zT1)           // 1A
+			P3_1.Mul(&sumT1, &state.diffR1) // 1M (uses precomputed diffR1)
+			diff1_1.Sub(&A1, &B1)           // 1A
+			Vdiff1.Sub(&diff1_1, &P3_1)     // 1A
+			xT1new.Square(&diff1_1)         // 1S
+			xT1new.Mul(&xT1new, &invXQmP)   // 1M
+			zT1new.Square(&Vdiff1)          // 1S
+
+			// T2: 4M + 2S
+			A2.Mul(&xT2, &state.xR1)        // 1M
+			B2.Mul(&zT2, &state.zR1)        // 1M
+			sumT2.Add(&xT2, &zT2)           // 1A
+			P3_2.Mul(&sumT2, &state.diffR1) // 1M (uses precomputed diffR1)
+			diff1_2.Sub(&A2, &B2)           // 1A
+			Vdiff2.Sub(&diff1_2, &P3_2)     // 1A
+			xT2new.Square(&diff1_2)         // 1S
+			xT2new.Mul(&xT2new, &invXQmP2)  // 1M
+			zT2new.Square(&Vdiff2)          // 1S
 		}
 
 		xT1, xT1new = xT1new, xT1
@@ -897,54 +916,58 @@ func IsInSubGroupCubicalMontgomery(xP, xP2, xQmP, xQmP2 *fp.Element) bool {
 	xT1, zT1 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, xP, &oneZ, &invXQmP)
 	xT2, zT2 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, xP2, &oneZ, &invXQmP2)
 
-	// Temporaries
-	var U, V, t1, t2, Vdiff fp.Element
+	// Temporaries - using optimized Karatsuba-like formula (4M + 2S per cADD instead of 5M + 2S)
+	// diffR values are precomputed in the table
+	var A1, B1, P3_1, sumT1, diff1_1, Vdiff1 fp.Element
+	var A2, B2, P3_2, sumT2, diff1_2, Vdiff2 fp.Element
 	var xT1new, zT1new, xT2new, zT2new fp.Element
 
-	// Process using precomputed ladder states
+	// Process using precomputed ladder states with optimized formula
 	for idx := 0; idx < 63; idx++ {
 		state := &tab.states[idx]
 
 		if state.bit == 0 {
-			U.Mul(&xT1, &state.xR0)
-			V.Mul(&zT1, &state.zR0)
-			t1.Mul(&xT1, &state.zR0)
-			t2.Mul(&zT1, &state.xR0)
-			Vdiff.Sub(&t1, &t2)
-			xT1new.Sub(&U, &V)
-			xT1new.Square(&xT1new)
+			// T1 += R0, T2 += R0 (diffR0 is precomputed)
+			A1.Mul(&xT1, &state.xR0)
+			B1.Mul(&zT1, &state.zR0)
+			sumT1.Add(&xT1, &zT1)
+			P3_1.Mul(&sumT1, &state.diffR0)
+			diff1_1.Sub(&A1, &B1)
+			Vdiff1.Sub(&diff1_1, &P3_1)
+			xT1new.Square(&diff1_1)
 			xT1new.Mul(&xT1new, &invXP)
-			zT1new.Square(&Vdiff)
+			zT1new.Square(&Vdiff1)
 
-			U.Mul(&xT2, &state.xR0)
-			V.Mul(&zT2, &state.zR0)
-			t1.Mul(&xT2, &state.zR0)
-			t2.Mul(&zT2, &state.xR0)
-			Vdiff.Sub(&t1, &t2)
-			xT2new.Sub(&U, &V)
-			xT2new.Square(&xT2new)
+			A2.Mul(&xT2, &state.xR0)
+			B2.Mul(&zT2, &state.zR0)
+			sumT2.Add(&xT2, &zT2)
+			P3_2.Mul(&sumT2, &state.diffR0)
+			diff1_2.Sub(&A2, &B2)
+			Vdiff2.Sub(&diff1_2, &P3_2)
+			xT2new.Square(&diff1_2)
 			xT2new.Mul(&xT2new, &invXP2)
-			zT2new.Square(&Vdiff)
+			zT2new.Square(&Vdiff2)
 		} else {
-			U.Mul(&xT1, &state.xR1)
-			V.Mul(&zT1, &state.zR1)
-			t1.Mul(&xT1, &state.zR1)
-			t2.Mul(&zT1, &state.xR1)
-			Vdiff.Sub(&t1, &t2)
-			xT1new.Sub(&U, &V)
-			xT1new.Square(&xT1new)
+			// T1 += R1, T2 += R1 (diffR1 is precomputed)
+			A1.Mul(&xT1, &state.xR1)
+			B1.Mul(&zT1, &state.zR1)
+			sumT1.Add(&xT1, &zT1)
+			P3_1.Mul(&sumT1, &state.diffR1)
+			diff1_1.Sub(&A1, &B1)
+			Vdiff1.Sub(&diff1_1, &P3_1)
+			xT1new.Square(&diff1_1)
 			xT1new.Mul(&xT1new, &invXQmP)
-			zT1new.Square(&Vdiff)
+			zT1new.Square(&Vdiff1)
 
-			U.Mul(&xT2, &state.xR1)
-			V.Mul(&zT2, &state.zR1)
-			t1.Mul(&xT2, &state.zR1)
-			t2.Mul(&zT2, &state.xR1)
-			Vdiff.Sub(&t1, &t2)
-			xT2new.Sub(&U, &V)
-			xT2new.Square(&xT2new)
+			A2.Mul(&xT2, &state.xR1)
+			B2.Mul(&zT2, &state.zR1)
+			sumT2.Add(&xT2, &zT2)
+			P3_2.Mul(&sumT2, &state.diffR1)
+			diff1_2.Sub(&A2, &B2)
+			Vdiff2.Sub(&diff1_2, &P3_2)
+			xT2new.Square(&diff1_2)
 			xT2new.Mul(&xT2new, &invXQmP2)
-			zT2new.Square(&Vdiff)
+			zT2new.Square(&Vdiff2)
 		}
 
 		xT1, xT1new = xT1new, xT1
@@ -1332,9 +1355,11 @@ func cubicalLadderCombined(xQ, xP, xP2, xQmP, xQmP2, invXQ, invXP, invXP2, invXQ
 		zT2.Square(&Vdiff)
 	}
 
-	// Temporary variables
-	var U, V, t1, t2, Vdiff fp.Element
+	// Temporary variables - using Karatsuba-like optimization for cADD
+	// Standard cADD: 4M + 2S, Optimized: 3M + 2S per cADD (+ shared diffR)
+	var A, B, P3, sumT, diff1, Vdiff fp.Element
 	var sum, diff, sumSq, diffSq, t, temp fp.Element
+	var diffR fp.Element
 	var xR0new, zR0new, xR1new, zR1new fp.Element
 	var xT1new, zT1new, xT2new, zT2new fp.Element
 
@@ -1343,37 +1368,43 @@ func cubicalLadderCombined(xQ, xP, xP2, xQmP, xQmP2, invXQ, invXP, invXP2, invXQ
 		bit := (n[i>>3] >> (i & 7)) & 1
 
 		if bit == 0 {
-			// All three cADDs (T1+R0, T2+R0, and partially R1) use R0
-			// cADD: R1new = R0 + R1 (diff = Q)
-			U.Mul(&xR0, &xR1)
-			V.Mul(&zR0, &zR1)
-			t1.Mul(&xR0, &zR1)
-			t2.Mul(&zR0, &xR1)
-			Vdiff.Sub(&t1, &t2)
-			xR1new.Sub(&U, &V)
-			xR1new.Square(&xR1new)
-			xR1new.Mul(&xR1new, invXQ)
-			zR1new.Square(&Vdiff)
+			// Shared diffR0 = xR0 - zR0 for T1 and T2
+			diffR.Sub(&xR0, &zR0)
 
-			// cADD: T1new = T1 + R0, T2new = T2 + R0
-			// Reuse zR0 products where possible
-			t1.Mul(&xT1, &zR0)
-			t2.Mul(&zT1, &xR0)
-			U.Mul(&xT1, &xR0)
-			V.Mul(&zT1, &zR0)
-			Vdiff.Sub(&t1, &t2)
-			xT1new.Sub(&U, &V)
-			xT1new.Square(&xT1new)
+			// cADD: R1new = R0 + R1 (diff = Q) - Karatsuba-like
+			{
+				var diffR1 fp.Element
+				diffR1.Sub(&xR1, &zR1)
+				A.Mul(&xR0, &xR1)
+				B.Mul(&zR0, &zR1)
+				sumT.Add(&xR0, &zR0)
+				P3.Mul(&sumT, &diffR1)
+				diff1.Sub(&A, &B)
+				Vdiff.Sub(&diff1, &P3)
+				xR1new.Square(&diff1)
+				xR1new.Mul(&xR1new, invXQ)
+				zR1new.Square(&Vdiff)
+			}
+
+			// cADD: T1new = T1 + R0 - uses shared diffR
+			A.Mul(&xT1, &xR0)
+			B.Mul(&zT1, &zR0)
+			sumT.Add(&xT1, &zT1)
+			P3.Mul(&sumT, &diffR)
+			diff1.Sub(&A, &B)
+			Vdiff.Sub(&diff1, &P3)
+			xT1new.Square(&diff1)
 			xT1new.Mul(&xT1new, invXP)
 			zT1new.Square(&Vdiff)
 
-			t1.Mul(&xT2, &zR0)
-			t2.Mul(&zT2, &xR0)
-			U.Mul(&xT2, &xR0)
-			V.Mul(&zT2, &zR0)
-			Vdiff.Sub(&t1, &t2)
-			xT2new.Sub(&U, &V)
-			xT2new.Square(&xT2new)
+			// cADD: T2new = T2 + R0 - uses shared diffR
+			A.Mul(&xT2, &xR0)
+			B.Mul(&zT2, &zR0)
+			sumT.Add(&xT2, &zT2)
+			P3.Mul(&sumT, &diffR)
+			diff1.Sub(&A, &B)
+			Vdiff.Sub(&diff1, &P3)
+			xT2new.Square(&diff1)
 			xT2new.Mul(&xT2new, invXP2)
 			zT2new.Square(&Vdiff)
 
@@ -1397,36 +1428,43 @@ func cubicalLadderCombined(xQ, xP, xP2, xQmP, xQmP2, invXQ, invXP, invXP2, invXQ
 			xT2, xT2new = xT2new, xT2
 			zT2, zT2new = zT2new, zT2
 		} else {
-			// All use R0+R1 or R1, share R1 products
-			// cADD: R0new = R0 + R1 (diff = Q)
-			U.Mul(&xR0, &xR1)
-			V.Mul(&zR0, &zR1)
-			t1.Mul(&xR0, &zR1)
-			t2.Mul(&zR0, &xR1)
-			Vdiff.Sub(&t1, &t2)
-			xR0new.Sub(&U, &V)
-			xR0new.Square(&xR0new)
-			xR0new.Mul(&xR0new, invXQ)
-			zR0new.Square(&Vdiff)
+			// Shared diffR1 = xR1 - zR1 for T1 and T2
+			diffR.Sub(&xR1, &zR1)
 
-			// cADD: T1new = T1 + R1, T2new = T2 + R1
-			t1.Mul(&xT1, &zR1)
-			t2.Mul(&zT1, &xR1)
-			U.Mul(&xT1, &xR1)
-			V.Mul(&zT1, &zR1)
-			Vdiff.Sub(&t1, &t2)
-			xT1new.Sub(&U, &V)
-			xT1new.Square(&xT1new)
+			// cADD: R0new = R0 + R1 (diff = Q) - Karatsuba-like
+			{
+				var diffR0 fp.Element
+				diffR0.Sub(&xR0, &zR0)
+				A.Mul(&xR0, &xR1)
+				B.Mul(&zR0, &zR1)
+				sumT.Add(&xR1, &zR1)
+				P3.Mul(&sumT, &diffR0)
+				diff1.Sub(&A, &B)
+				Vdiff.Sub(&diff1, &P3)
+				xR0new.Square(&diff1)
+				xR0new.Mul(&xR0new, invXQ)
+				zR0new.Square(&Vdiff)
+			}
+
+			// cADD: T1new = T1 + R1 - uses shared diffR
+			A.Mul(&xT1, &xR1)
+			B.Mul(&zT1, &zR1)
+			sumT.Add(&xT1, &zT1)
+			P3.Mul(&sumT, &diffR)
+			diff1.Sub(&A, &B)
+			Vdiff.Sub(&diff1, &P3)
+			xT1new.Square(&diff1)
 			xT1new.Mul(&xT1new, invXQmP)
 			zT1new.Square(&Vdiff)
 
-			t1.Mul(&xT2, &zR1)
-			t2.Mul(&zT2, &xR1)
-			U.Mul(&xT2, &xR1)
-			V.Mul(&zT2, &zR1)
-			Vdiff.Sub(&t1, &t2)
-			xT2new.Sub(&U, &V)
-			xT2new.Square(&xT2new)
+			// cADD: T2new = T2 + R1 - uses shared diffR
+			A.Mul(&xT2, &xR1)
+			B.Mul(&zT2, &zR1)
+			sumT.Add(&xT2, &zT2)
+			P3.Mul(&sumT, &diffR)
+			diff1.Sub(&A, &B)
+			Vdiff.Sub(&diff1, &P3)
+			xT2new.Square(&diff1)
 			xT2new.Mul(&xT2new, invXQmP2)
 			zT2new.Square(&Vdiff)
 
