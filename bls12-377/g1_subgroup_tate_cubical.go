@@ -31,11 +31,12 @@ import (
 
 // Montgomery curve constants (computed once at init)
 var (
-	montConstOnce sync.Once
-	sqrt3         fp.Element // √3
-	invSqrt3      fp.Element // 1/√3
-	montA         fp.Element // -√3
-	montA24       fp.Element // (A+2)/4
+	montConstOnce   sync.Once
+	sqrt3           fp.Element // √3
+	invSqrt3        fp.Element // 1/√3
+	montA           fp.Element // -√3
+	montA24         fp.Element // (A+2)/4
+	thirdRootOneG1  fp.Element // ω = primitive cube root of unity for GLV endomorphism
 )
 
 // initMontgomeryConstants initializes the Montgomery curve parameters.
@@ -53,6 +54,9 @@ func initMontgomeryConstants() {
 		four.SetUint64(4)
 		montA24.Add(&montA, &two)
 		montA24.Div(&montA24, &four)
+
+		// GLV endomorphism: φ(P) = (ω·x, y) where ω is a primitive cube root of unity
+		thirdRootOneG1.SetString("80949648264912719408558363140637477264845294720710499478137287262712535938301461879813459410945")
 	})
 }
 
@@ -561,20 +565,22 @@ func millerLoopSingle(q, p *curve.G1Affine) (num, den fp.Element) {
 
 // ladderState stores the ladder state at a given iteration
 type ladderState struct {
-	xR0, zR0   fp.Element // Current R0 = [k]Q
-	xR1, zR1   fp.Element // Current R1 = [k+1]Q
-	diffR0     fp.Element // xR0 - zR0 (precomputed for Karatsuba)
-	diffR1     fp.Element // xR1 - zR1 (precomputed for Karatsuba)
-	bit        uint8      // The bit value at this iteration
+	xR0, zR0 fp.Element // Current R0 = [k]Q
+	xR1, zR1 fp.Element // Current R1 = [k+1]Q
+	diffR0   fp.Element // xR0 - zR0 (precomputed for Karatsuba)
+	diffR1   fp.Element // xR1 - zR1 (precomputed for Karatsuba)
+	bit      uint8      // The bit value at this iteration
+	zR0IsOne bool       // True if zR0 = 1 (for first iteration optimization)
 }
 
 // Precomputed cubical table for Q with full ladder trajectory
 type cubicalTable struct {
-	q       curve.G1Affine
-	xQ      fp.Element    // Montgomery x-coordinate of Q
-	invXQ   fp.Element    // 1/xQ
-	states  []ladderState // Ladder states at each iteration (63 entries)
-	finalNQ PointXZ       // Final [n]Q
+	q           curve.G1Affine
+	xQ          fp.Element    // Montgomery x-coordinate of Q
+	invXQ       fp.Element    // 1/xQ
+	states      []ladderState // Ladder states at each iteration (63 entries)
+	finalNQ     PointXZ       // Final [n]Q
+	invFinalNQZ fp.Element    // 1/finalNQ.Z (precomputed to save inversion at runtime)
 }
 
 var (
@@ -618,6 +624,7 @@ func precomputeCubicalTable() *cubicalTable {
 			cubicalPrecomp.states[idx].diffR0.Sub(&xR0, &zR0)
 			cubicalPrecomp.states[idx].diffR1.Sub(&xR1, &zR1)
 			cubicalPrecomp.states[idx].bit = bit
+			cubicalPrecomp.states[idx].zR0IsOne = zR0.IsOne() // Track if zR0 = 1 for optimization
 
 			// Perform ladder step
 			if bit == 0 {
@@ -629,9 +636,10 @@ func precomputeCubicalTable() *cubicalTable {
 			}
 		}
 
-		// Store final [n]Q
+		// Store final [n]Q and precompute its inverse
 		cubicalPrecomp.finalNQ.X.Set(&xR0)
 		cubicalPrecomp.finalNQ.Z.Set(&zR0)
+		cubicalPrecomp.invFinalNQZ.Inverse(&zR0)
 	})
 	return &cubicalPrecomp
 }
@@ -655,16 +663,11 @@ func IsInSubGroupTateCubical(p *curve.G1Affine) bool {
 func membershipTestCubicalPrecomputed(p *curve.G1Affine, tab *cubicalTable) bool {
 	initMontgomeryConstants()
 
-	var thirdRootOneG1 fp.Element
-	thirdRootOneG1.SetString("80949648264912719408558363140637477264845294720710499478137287262712535938301461879813459410945")
-
-	// Convert P and φ(P) to Montgomery
-	xP := weierstrassToMontgomeryX(&p.X)
+	// Compute φ(P) = (ω·x, y) in Weierstrass using precomputed cube root of unity
 	var p2X fp.Element
 	p2X.Mul(&p.X, &thirdRootOneG1)
-	xP2 := weierstrassToMontgomeryX(&p2X)
 
-	// Compute x(Q - P) and x(Q - φ(P))
+	// Compute Q - P and Q - φ(P) in Weierstrass
 	var qMinusP, qMinusP2 curve.G1Affine
 	var pNeg, p2Neg curve.G1Affine
 	pNeg.X.Set(&p.X)
@@ -673,8 +676,19 @@ func membershipTestCubicalPrecomputed(p *curve.G1Affine, tab *cubicalTable) bool
 	p2Neg.Y.Neg(&p.Y)
 	qMinusP.Add(&tab.q, &pNeg)
 	qMinusP2.Add(&tab.q, &p2Neg)
-	xQmP := weierstrassToMontgomeryX(&qMinusP.X)
-	xQmP2 := weierstrassToMontgomeryX(&qMinusP2.X)
+
+	// Convert all 4 x-coordinates to Montgomery in batch (saves function call overhead)
+	// u = (x + 1) / √3  →  u = (x + 1) * invSqrt3
+	var xP, xP2, xQmP, xQmP2, one fp.Element
+	one.SetOne()
+	xP.Add(&p.X, &one)
+	xP.Mul(&xP, &invSqrt3)
+	xP2.Add(&p2X, &one)
+	xP2.Mul(&xP2, &invSqrt3)
+	xQmP.Add(&qMinusP.X, &one)
+	xQmP.Mul(&xQmP, &invSqrt3)
+	xQmP2.Add(&qMinusP2.X, &one)
+	xQmP2.Mul(&xQmP2, &invSqrt3)
 
 	// Batch inversion for 4 elements
 	var invXP, invXP2, invXQmP, invXQmP2 fp.Element
@@ -694,13 +708,10 @@ func membershipTestCubicalPrecomputed(p *curve.G1Affine, tab *cubicalTable) bool
 	invXP.Set(&t0123)
 
 	// Initialize T1 = Q + P, T2 = Q + P2
+	// Use cADDAffine since both Q and P/P2 have Z=1 initially (saves 6M total)
 	var xT1, zT1, xT2, zT2 fp.Element
-	var oneZ fp.Element
-	oneZ.SetOne()
-
-	// Use precomputed first state (R0 = Q)
-	xT1, zT1 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, &xP, &oneZ, &invXQmP)
-	xT2, zT2 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, &xP2, &oneZ, &invXQmP2)
+	xT1, zT1 = cADDAffine(&tab.states[0].xR0, &xP, &invXQmP)
+	xT2, zT2 = cADDAffine(&tab.states[0].xR0, &xP2, &invXQmP2)
 
 	// Temporaries - using optimized Karatsuba-like formula
 	// Standard cADD: 4M (for products) + 1M (by inv) + 2S = 5M + 2S per cADD
@@ -781,10 +792,10 @@ func membershipTestCubicalPrecomputed(p *curve.G1Affine, tab *cubicalTable) bool
 	}
 
 	// e_c(Q, P) = Z_{[ℓ]Q+P} / Z_{[ℓ]Q}
-	var n1, n2, invNQZ fp.Element
-	invNQZ.Inverse(&tab.finalNQ.Z)
-	n1.Mul(&zT1, &invNQZ)
-	n2.Mul(&zT2, &invNQZ)
+	// Use precomputed inverse to save one inversion per call
+	var n1, n2 fp.Element
+	n1.Mul(&zT1, &tab.invFinalNQZ)
+	n2.Mul(&zT2, &tab.invFinalNQZ)
 
 	return f1IsOne(&n1) && f2IsOne(&n2)
 }
@@ -793,10 +804,7 @@ func membershipTestCubicalPrecomputed(p *curve.G1Affine, tab *cubicalTable) bool
 func membershipTestCubicalOptimized(p *curve.G1Affine, tab *cubicalTable) bool {
 	initMontgomeryConstants()
 
-	var thirdRootOneG1 fp.Element
-	thirdRootOneG1.SetString("80949648264912719408558363140637477264845294720710499478137287262712535938301461879813459410945")
-
-	// Convert P and φ(P) to Montgomery x-coordinates
+	// Convert P and φ(P) to Montgomery x-coordinates using precomputed cube root of unity
 	xP := weierstrassToMontgomeryX(&p.X)
 	var p2X fp.Element
 	p2X.Mul(&p.X, &thirdRootOneG1)
@@ -910,11 +918,10 @@ func IsInSubGroupCubicalMontgomery(xP, xP2, xQmP, xQmP2 *fp.Element) bool {
 	invXP.Set(&t0123)
 
 	// Initialize T1 = Q + P, T2 = Q + P2
+	// Use cADDAffine since both Q and P/P2 have Z=1 initially (saves 6M total)
 	var xT1, zT1, xT2, zT2 fp.Element
-	var oneZ fp.Element
-	oneZ.SetOne()
-	xT1, zT1 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, xP, &oneZ, &invXQmP)
-	xT2, zT2 = cADD(&tab.states[0].xR0, &tab.states[0].zR0, xP2, &oneZ, &invXQmP2)
+	xT1, zT1 = cADDAffine(&tab.states[0].xR0, xP, &invXQmP)
+	xT2, zT2 = cADDAffine(&tab.states[0].xR0, xP2, &invXQmP2)
 
 	// Temporaries - using optimized Karatsuba-like formula (4M + 2S per cADD instead of 5M + 2S)
 	// diffR values are precomputed in the table
@@ -980,10 +987,10 @@ func IsInSubGroupCubicalMontgomery(xP, xP2, xQmP, xQmP2 *fp.Element) bool {
 		return false
 	}
 
-	var n1, n2, invNQZ fp.Element
-	invNQZ.Inverse(&tab.finalNQ.Z)
-	n1.Mul(&zT1, &invNQZ)
-	n2.Mul(&zT2, &invNQZ)
+	// Use precomputed inverse
+	var n1, n2 fp.Element
+	n1.Mul(&zT1, &tab.invFinalNQZ)
+	n2.Mul(&zT2, &tab.invFinalNQZ)
 
 	return f1IsOne(&n1) && f2IsOne(&n2)
 }
@@ -994,13 +1001,10 @@ func IsInSubGroupCubicalMontgomery(xP, xP2, xQmP, xQmP2 *fp.Element) bool {
 func ComputeMontgomeryInputs(p *curve.G1Affine) (xP, xP2, xQmP, xQmP2 fp.Element) {
 	initMontgomeryConstants()
 
-	var thirdRootOneG1 fp.Element
-	thirdRootOneG1.SetString("80949648264912719408558363140637477264845294720710499478137287262712535938301461879813459410945")
-
 	// Convert P to Montgomery
 	xP = weierstrassToMontgomeryX(&p.X)
 
-	// Compute φ(P) in Weierstrass then convert
+	// Compute φ(P) in Weierstrass then convert using precomputed cube root of unity
 	var p2X fp.Element
 	p2X.Mul(&p.X, &thirdRootOneG1)
 	xP2 = weierstrassToMontgomeryX(&p2X)
@@ -1027,10 +1031,9 @@ func ComputeMontgomeryInputs(p *curve.G1Affine) (xP, xP2, xQmP, xQmP2 fp.Element
 // membershipTestCubical performs the subgroup membership test using the Miller loop.
 // This implementation uses two separate Miller loop evaluations (at P and φ(P)).
 func membershipTestCubical(p, q *curve.G1Affine) bool {
-	var thirdRootOneG1 fp.Element
-	thirdRootOneG1.SetString("80949648264912719408558363140637477264845294720710499478137287262712535938301461879813459410945")
+	initMontgomeryConstants()
 
-	// Compute φ(P) = (ω·x, y) using the GLV endomorphism
+	// Compute φ(P) = (ω·x, y) using the GLV endomorphism and precomputed cube root of unity
 	var p2 curve.G1Affine
 	p2.X.Mul(&p.X, &thirdRootOneG1)
 	p2.Y.Set(&p.Y)
@@ -1059,6 +1062,30 @@ func membershipTestCubical(p, q *curve.G1Affine) bool {
 // cDBL is identical to xDBL (per the paper).
 func cDBL(XP, ZP *fp.Element) (X2P, Z2P fp.Element) {
 	return xDBL(XP, ZP)
+}
+
+// cADDAffine computes cubical differential addition P+Q when both points have Z=1.
+// This is an optimized version of cADD that saves 3 multiplications.
+// Given x_P, x_Q (both affine, Z=1) and 1/x(P-Q), computes (X_{P+Q}:Z_{P+Q}).
+func cADDAffine(xP, xQ, invXPmQ *fp.Element) (XPpQ, ZPpQ fp.Element) {
+	// When Z_P = Z_Q = 1:
+	// U = X_P * X_Q
+	// V = Z_P * Z_Q = 1 (no multiplication needed)
+	// Vdiff = X_P * Z_Q - Z_P * X_Q = X_P - X_Q (no multiplications needed)
+	// X_{P+Q} = (U - V)² * inv = (X_P*X_Q - 1)² * inv
+	// Z_{P+Q} = Vdiff² = (X_P - X_Q)²
+	var U, Vdiff, one fp.Element
+	one.SetOne()
+
+	U.Mul(xP, xQ)        // 1M (vs 4M in standard cADD)
+	U.Sub(&U, &one)      // U - 1
+	Vdiff.Sub(xP, xQ)    // X_P - X_Q
+
+	XPpQ.Square(&U)
+	XPpQ.Mul(&XPpQ, invXPmQ)
+	ZPpQ.Square(&Vdiff)
+
+	return XPpQ, ZPpQ
 }
 
 // cADD computes cubical differential addition P+Q given (X_P:Z_P), (X_Q:Z_Q) and 1/(X_{P-Q}).
@@ -1226,13 +1253,10 @@ func cubicalTatePairing(q, p *curve.G1Affine) (num, den fp.Element) {
 func membershipTestPureCubical(p, q *curve.G1Affine) bool {
 	initMontgomeryConstants()
 
-	var thirdRootOneG1 fp.Element
-	thirdRootOneG1.SetString("80949648264912719408558363140637477264845294720710499478137287262712535938301461879813459410945")
-
 	// Convert Q to Montgomery x-coordinate
 	xQ := weierstrassToMontgomeryX(&q.X)
 
-	// Compute φ(P) = (ω·x, y) using the GLV endomorphism
+	// Compute φ(P) = (ω·x, y) using the GLV endomorphism and precomputed cube root of unity
 	var p2X fp.Element
 	p2X.Mul(&p.X, &thirdRootOneG1)
 
@@ -1322,35 +1346,31 @@ func cubicalLadderCombined(xQ, xP, xP2, xQmP, xQmP2, invXQ, invXP, invXP2, invXQ
 		zR1.Mul(&t, &temp)
 	}
 
-	// Initialize T1 = Q + P, T2 = Q + P2 using inline cADD
+	// Initialize T1 = Q + P, T2 = Q + P2 using optimized inline cADDAffine
+	// Since zR0 = 1 and P/P2 have Z = 1, we save 6M total
 	var xT1, zT1, xT2, zT2 fp.Element
-	var oneZ fp.Element
-	oneZ.SetOne()
+	var one fp.Element
+	one.SetOne()
 
-	// Inline cADD for T1 = R0 + P (diff inverse = invXQmP)
+	// Inline cADDAffine for T1 = R0 + P (both have Z=1)
+	// U = xR0 * xP, V = 1, Vdiff = xR0 - xP
 	{
-		var U, V, t1, t2, Vdiff fp.Element
+		var U, Vdiff fp.Element
 		U.Mul(&xR0, xP)
-		V.Mul(&zR0, &oneZ)
-		t1.Mul(&xR0, &oneZ)
-		t2.Mul(&zR0, xP)
-		Vdiff.Sub(&t1, &t2)
-		xT1.Sub(&U, &V)
-		xT1.Square(&xT1)
+		U.Sub(&U, &one)       // U - 1
+		Vdiff.Sub(&xR0, xP)
+		xT1.Square(&U)
 		xT1.Mul(&xT1, invXQmP)
 		zT1.Square(&Vdiff)
 	}
 
-	// Inline cADD for T2 = R0 + P2 (diff inverse = invXQmP2)
+	// Inline cADDAffine for T2 = R0 + P2 (both have Z=1)
 	{
-		var U, V, t1, t2, Vdiff fp.Element
+		var U, Vdiff fp.Element
 		U.Mul(&xR0, xP2)
-		V.Mul(&zR0, &oneZ)
-		t1.Mul(&xR0, &oneZ)
-		t2.Mul(&zR0, xP2)
-		Vdiff.Sub(&t1, &t2)
-		xT2.Sub(&U, &V)
-		xT2.Square(&xT2)
+		U.Sub(&U, &one)       // U - 1
+		Vdiff.Sub(&xR0, xP2)
+		xT2.Square(&U)
 		xT2.Mul(&xT2, invXQmP2)
 		zT2.Square(&Vdiff)
 	}

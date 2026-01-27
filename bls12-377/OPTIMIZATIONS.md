@@ -66,3 +66,99 @@ The Karatsuba optimization was applied to:
 - `membershipTestCubicalPrecomputed` (main benchmark path)
 - `IsInSubGroupCubicalMontgomery` (Montgomery-native path)
 - `cubicalLadderCombined` (used by other functions)
+
+## Performance Summary
+
+| Method | Before | After | Improvement |
+|--------|--------|-------|-------------|
+| Tate-Cubical | ~72µs | ~60µs | ~17% |
+| Tate-Cubical-MontgomeryNative | ~58µs | ~54µs | ~7% |
+
+The cubical approach is still slower than Miller (~45µs) because it fundamentally requires computing two separate accumulator chains (T1 and T2) through 63 iterations, whereas Miller can share more computation between the two evaluation points.
+
+## Benchmark Results (Apple M1)
+
+```
+BenchmarkG1IsInSubGroupComparison/GLV-8                             ~42µs
+BenchmarkG1IsInSubGroupComparison/Tate-Miller-8                     ~45µs
+BenchmarkG1IsInSubGroupComparison/Tate-Miller-Precomputed-8         ~46µs
+BenchmarkG1IsInSubGroupComparison/Tate-Cubical-8                    ~60µs
+BenchmarkG1IsInSubGroupComparison/Tate-Cubical-MontgomeryNative-8   ~54µs
+```
+
+## 5. Differential Addition Chain / NAF Analysis (NOT Applicable)
+
+We investigated using the Non-Adjacent Form (NAF) representation to reduce T additions, as suggested by Costello-Smith (Section 6 of "Montgomery curves and their arithmetic").
+
+**NAF of e₂ - 1:**
+```
+e₂ - 1 = 0x8508bfffffffffff
+NAF:     0+0000+0+0000+00+0-000...000-
+Non-zero digits: 6 (vs 51 ones in binary)
+```
+
+**Decomposition:**
+```
+e₂ - 1 = 545932 × 2^44 - 1
+```
+
+**Why NAF/Addition Chains don't help for cubical pairing:**
+
+The T updates in the cubical pairing are NOT simply accumulating a scalar - they're accumulating the **pairing Z-coordinate**. Each cADD operation incorporates a factor into Z that corresponds to a line evaluation in the equivalent Miller loop.
+
+Testing confirmed that skipping T updates at NAF=0 positions **breaks the pairing computation**:
+- Standard approach: f1IsOne = true ✓
+- NAF-skipped approach: f1IsOne = false ✗
+
+**Conclusion:** The Montgomery ladder's T updates are essential for the pairing and cannot be reduced via NAF or other addition chain optimizations. The structure of the scalar (many consecutive 1s giving only 6 NAF digits) is mathematically interesting but doesn't translate to fewer operations for the cubical Tate pairing.
+
+The fundamental issue is that the cubical pairing formula:
+```
+e_c(Q, P) = Z_{[ℓ]Q+P} / Z_{[ℓ]Q}
+```
+requires the Z-coordinate to accumulate through ALL ladder steps, not just non-zero NAF positions.
+
+## 6. Why Cubical Tate Cannot Beat Miller Tate for Subgroup Testing
+
+The paper (ePrint 2025/672) shows faster **general pairings**, but the **subgroup membership test** has a specific structure that favors Miller:
+
+### The Subgroup Test Structure
+- Requires **two** pairing evaluations: `e(Q, P)` and `e(Q, φ(P))`
+- **Same Q**, different evaluation points (P and φ(P))
+- GLV endomorphism: φ(P) = (ωx, y)
+
+### Why Miller Wins Here
+
+**Miller (shared loop):**
+```
+T ← 2T              ← SHARED (expensive curve op, done ONCE)
+ℓ ← tangent at T    ← SHARED (computed ONCE)
+f₁ ← f₁² · ℓ(P)     ← cheap field evaluation
+f₂ ← f₂² · ℓ(φP)    ← cheap field evaluation
+```
+- Curve operations (doubling T) are **expensive** → done once
+- Field operations (evaluating ℓ at P, φP) are **cheap** → done twice
+
+**Cubical:**
+```
+R ← ladder step     ← Q trajectory
+T1 ← T1 + R         ← INDEPENDENT (expensive cADD)
+T2 ← T2 + R         ← INDEPENDENT (expensive cADD)
+```
+- T1 = [k]Q + P and T2 = [k]Q + φ(P) are **different points**
+- The Z-coordinate accumulation (which IS the pairing value) depends on P
+- **Cannot merge** T1 and T2 operations because they accumulate different Z values
+
+### The Fundamental Mismatch
+
+| Scenario | Cubical Excels | Miller Excels |
+|----------|---------------|---------------|
+| Single pairing e(Q,P) | ✓ | - |
+| Same P, different Q | ✓ | - |
+| **Same Q, different P** | ✗ | ✓ ← subgroup test |
+
+The cubical pairing's advantage is in x-only arithmetic for a single computation. But for "same Q, different P", the Miller loop's ability to **share the curve point trajectory** while cheaply evaluating at multiple points is superior.
+
+### Bottom Line
+
+**63 shared doublings + 126 cheap evals** (Miller) beats **63 ladder steps + 126 independent cADDs** (Cubical)
